@@ -9,8 +9,12 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { fetchAIResponse } from "@/api/chat";
-import { VoiceChat, textToSpeech, playAudioBuffer, createConversationalAgent } from "@/api/elevenlabs";
+import { streamTextToSpeech } from "@/api/elevenlabs";
+import * as vad from "@ricky0123/vad-web";
+import { AudioVisualizer } from "react-audio-visualize";
 
 interface Message {
   id: string;
@@ -23,80 +27,101 @@ interface Message {
 interface TestAgentDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  selectedVoice: string;
 }
 
-export default function TestAgentDialog({ open, onOpenChange }: TestAgentDialogProps) {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content: "Hello! I'm ready for voice chat. Click the microphone to start talking.",
-      timestamp: new Date(),
-    },
-  ]);
+export default function TestAgentDialog({ open, onOpenChange, selectedVoice }: TestAgentDialogProps) {
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const savedMessages = localStorage.getItem("chatHistory");
+    if (savedMessages) {
+      return JSON.parse(savedMessages).map((msg: any) => ({
+        ...msg,
+        timestamp: new Date(msg.timestamp),
+      }));
+    }
+    return [
+      {
+        id: "welcome",
+        role: "assistant",
+        content: "Hello! I'm ready for voice chat. Click the microphone to start talking.",
+        timestamp: new Date(),
+      },
+    ];
+  });
+
+  useEffect(() => {
+    localStorage.setItem("chatHistory", JSON.stringify(messages));
+  }, [messages]);
   
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [agentId, setAgentId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState(false);
-  
-  const voiceChatRef = useRef<VoiceChat | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const [useVAD, setUseVAD] = useState(false);
+  const vadRef = useRef<vad.MicVAD | null>(null);
 
-  // Initialize the voice chat agent when dialog opens
   useEffect(() => {
-    if (open && !agentId) {
-      initializeAgent();
+    if (useVAD) {
+      const initVAD = async () => {
+        const myvad = await vad.MicVAD.new({
+          onSpeechStart: () => {
+            startRecording();
+          },
+          onSpeechEnd: () => {
+            stopRecording();
+          },
+        });
+        vadRef.current = myvad;
+        myvad.start();
+      };
+      initVAD();
+    } else {
+      if (vadRef.current) {
+        vadRef.current.destroy();
+        vadRef.current = null;
+      }
+    }
+    return () => {
+      if (vadRef.current) {
+        vadRef.current.destroy();
+        vadRef.current = null;
+      }
+    };
+  }, [useVAD]);
+  
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+
+  useEffect(() => {
+    if (open && !audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
   }, [open]);
 
-  const initializeAgent = async () => {
-    try {
-      setError(null);
-      
-      // Create a conversational agent
-      const agent = await createConversationalAgent({
-        conversationConfig: {
-          agentPrompt: "You are a helpful AI assistant created by ElevenLabs. You provide concise, natural responses in voice conversations about technology, voice synthesis, and general topics. Keep responses conversational and under 100 words.",
-          language: "en",
-          llm: {
-            model: "gpt-4",
-            temperature: 0.7,
-          }
-        },
-        voiceSettings: {
-          voiceId: "21m00Tcm4TlvDq8ikWAM", // Rachel
-          stability: 0.5,
-          similarityBoost: 0.8,
-        }
-      });
-      
-      setAgentId(agent.agent_id);
-      
-      // Initialize voice chat
-      voiceChatRef.current = new VoiceChat(agent.agent_id);
-      await voiceChatRef.current.initialize();
-      
-    } catch (error) {
-      console.error('Failed to initialize agent:', error);
-      setError(error instanceof Error ? error.message : 'Failed to initialize voice chat');
-    }
-  };
-
   const startRecording = async () => {
-    if (!voiceChatRef.current) {
-      setError('Voice chat not initialized');
-      return;
-    }
-
     try {
       setError(null);
-      await voiceChatRef.current.startRecording();
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorderRef.current = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+
+      mediaRecorderRef.current.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorderRef.current.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        processAudio(audioBlob);
+      };
+
+      mediaRecorderRef.current.start();
       setIsRecording(true);
       
-      // Add recording indicator message
       const recordingMessage: Message = {
         id: `recording-${Date.now()}`,
         role: "user",
@@ -112,13 +137,10 @@ export default function TestAgentDialog({ open, onOpenChange }: TestAgentDialogP
   };
 
   const stopRecording = async () => {
-    if (!voiceChatRef.current || !isRecording) return;
-
-    try {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
       setIsRecording(false);
       setIsProcessing(true);
-      
-      // Update recording message
       setMessages(prev => 
         prev.map(msg => 
           msg.content === "🎤 Recording..." 
@@ -126,43 +148,47 @@ export default function TestAgentDialog({ open, onOpenChange }: TestAgentDialogP
             : msg
         )
       );
+    }
+  };
 
-      const audioBlob = await voiceChatRef.current.stopRecording();
-      
-      // Convert audio to text and get AI response
-      const responseAudio = await voiceChatRef.current.sendAudioMessage(audioBlob);
-      
-      // Update message to show audio was processed
-      setMessages(prev => 
-        prev.map(msg => 
-          msg.content === "Processing audio..." 
-            ? { ...msg, content: "🎤 Audio message sent" }
-            : msg
-        )
-      );
+  const processAudio = async (audioBlob: Blob) => {
+    try {
+      const reader = new FileReader();
+      reader.readAsDataURL(audioBlob);
+      reader.onloadend = async () => {
+        const base64Audio = (reader.result as string).split(',')[1];
 
-      // Add AI response message
-      const aiMessage: Message = {
-        id: `ai-${Date.now()}`,
-        role: "assistant",
-        content: "🔊 AI Voice Response",
-        timestamp: new Date(),
-        isAudio: true,
+        const response = await fetchAIResponse([{ role: 'user', content: `data:audio/webm;base64,${base64Audio}` }]);
+
+        if (response.status === 'success') {
+          const aiResponseText = response.data.choices[0].message.content;
+
+          setMessages(prev =>
+            prev.map(msg =>
+              msg.content === "Processing audio..."
+                ? { ...msg, content: "🎤 Audio message sent" }
+                : msg
+            )
+          );
+
+          const aiMessage: Message = {
+            id: `ai-${Date.now()}`,
+            role: "assistant",
+            content: aiResponseText,
+            timestamp: new Date(),
+          };
+          setMessages(prev => [...prev, aiMessage]);
+
+          if (!isMuted) {
+            playStreamingAudio(aiResponseText);
+          }
+        } else {
+          throw new Error(response.error);
+        }
       };
-      setMessages(prev => [...prev, aiMessage]);
-
-      // Play the AI response
-      if (!isMuted) {
-        setIsPlaying(true);
-        await playAudioBuffer(responseAudio);
-        setIsPlaying(false);
-      }
-
     } catch (error) {
       console.error('Error processing audio:', error);
       setError('Failed to process audio message');
-      
-      // Remove recording message on error
       setMessages(prev => 
         prev.filter(msg => !msg.content.includes("Recording") && !msg.content.includes("Processing"))
       );
@@ -171,8 +197,77 @@ export default function TestAgentDialog({ open, onOpenChange }: TestAgentDialogP
     }
   };
 
+  const playStreamingAudio = async (text: string) => {
+    if (!audioContextRef.current) return;
+
+    setIsPlaying(true);
+    const audioStream = await streamTextToSpeech(text, { voiceId: selectedVoice });
+    const reader = audioStream.getReader();
+    const audioContext = audioContextRef.current;
+
+    const playChunk = async (chunk: ArrayBuffer) => {
+      try {
+        const audioBuffer = await audioContext.decodeAudioData(chunk);
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        source.start();
+        audioSourceRef.current = source;
+        return new Promise<void>(resolve => {
+          source.onended = () => resolve();
+        });
+      } catch (error) {
+        console.error("Error playing audio chunk:", error);
+      }
+    };
+
+    const processStream = async () => {
+      while (true) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+          await playChunk(value.buffer);
+        } catch (error) {
+          console.error("Error reading from stream:", error);
+          break;
+        }
+      }
+      setIsPlaying(false);
+      audioSourceRef.current = null;
+    };
+
+    processStream();
+  };
+
+  const stopAudio = () => {
+    if (audioSourceRef.current) {
+      audioSourceRef.current.stop();
+      audioSourceRef.current = null;
+    }
+    setIsPlaying(false);
+  };
+
+  const handleMicPress = () => {
+    if (isPlaying) {
+      stopAudio();
+    } else {
+      startRecording();
+    }
+  };
+
+  const handleMicRelease = () => {
+    if (isRecording) {
+      stopRecording();
+    }
+  };
+
   const toggleMute = () => {
     setIsMuted(!isMuted);
+    if (!isMuted) {
+      stopAudio();
+    }
   };
 
   return (
@@ -180,7 +275,7 @@ export default function TestAgentDialog({ open, onOpenChange }: TestAgentDialogP
       <DialogContent className="sm:max-w-[500px] max-h-[600px] flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <span className={`h-2 w-2 rounded-full ${agentId ? 'bg-green-500' : 'bg-yellow-500'}`} />
+            <span className={`h-2 w-2 rounded-full bg-green-500`} />
             Voice Chat with AI Agent
           </DialogTitle>
           <DialogDescription>
@@ -268,13 +363,13 @@ export default function TestAgentDialog({ open, onOpenChange }: TestAgentDialogP
                 ? "bg-red-500 hover:bg-red-600 animate-pulse" 
                 : "bg-primary hover:bg-primary/90"
             }`}
-            onMouseDown={startRecording}
-            onMouseUp={stopRecording}
-            onTouchStart={startRecording}
-            onTouchEnd={stopRecording}
-            disabled={isProcessing || !agentId}
+            onMouseDown={handleMicPress}
+            onMouseUp={handleMicRelease}
+            onTouchStart={handleMicPress}
+            onTouchEnd={handleMicRelease}
+            disabled={isProcessing}
           >
-            {isRecording ? (
+            {isRecording || isPlaying ? (
               <MicOff className="h-6 w-6" />
             ) : (
               <Mic className="h-6 w-6" />
@@ -282,6 +377,16 @@ export default function TestAgentDialog({ open, onOpenChange }: TestAgentDialogP
           </Button>
           
           <div className="w-12 h-12 flex items-center justify-center">
+            {isRecording && mediaRecorderRef.current && (
+              <AudioVisualizer
+                mediaRecorder={mediaRecorderRef.current}
+                width={50}
+                height={50}
+                barWidth={2}
+                gap={1}
+                barColor={"#A1A1AA"}
+              />
+            )}
             {isPlaying && (
               <div className="flex space-x-1">
                 <div className="w-1 h-4 bg-primary animate-bounce" style={{animationDelay: '0ms'}}></div>
@@ -295,8 +400,14 @@ export default function TestAgentDialog({ open, onOpenChange }: TestAgentDialogP
         <div className="text-center text-xs text-muted-foreground pb-2">
           {isRecording 
             ? "Release to send your message" 
-            : "Hold the microphone button to speak"
+            : isPlaying
+            ? "Click the mic to interrupt"
+            : useVAD ? "Speak to talk" : "Hold the microphone button to speak"
           }
+        </div>
+        <div className="flex items-center justify-center space-x-2">
+          <Switch id="vad-switch" checked={useVAD} onCheckedChange={setUseVAD} />
+          <Label htmlFor="vad-switch">Enable VAD</Label>
         </div>
       </DialogContent>
     </Dialog>

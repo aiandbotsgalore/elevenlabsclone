@@ -11,6 +11,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("agent");
   const [testDialogOpen, setTestDialogOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [selectedVoice, setSelectedVoice] = useState<string>("");
 
   const handleCopyLink = () => {
     // In a real app, this would get the actual URL
@@ -148,7 +149,7 @@ export default function App() {
           {/* Tab Content */}
           <div className="p-4">
             {activeTab === "agent" && <AgentTab />}
-            {activeTab === "voice" && <VoiceTab />}
+            {activeTab === "voice" && <VoiceTab selectedVoice={selectedVoice} setSelectedVoice={setSelectedVoice} />}
           </div>
         </div>
       </main>
@@ -157,6 +158,7 @@ export default function App() {
       <TestAgentDialog
         open={testDialogOpen}
         onOpenChange={setTestDialogOpen}
+        selectedVoice={selectedVoice}
       />
     </div>
   );
