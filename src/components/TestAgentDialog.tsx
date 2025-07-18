@@ -9,8 +9,12 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { fetchAIResponse } from "@/api/chat";
 import { streamTextToSpeech } from "@/api/elevenlabs";
+import * as vad from "@ricky0123/vad-web";
+import { AudioVisualizer } from "react-audio-visualize";
 
 interface Message {
   id: string;
@@ -27,20 +31,64 @@ interface TestAgentDialogProps {
 }
 
 export default function TestAgentDialog({ open, onOpenChange, selectedVoice }: TestAgentDialogProps) {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content: "Hello! I'm ready for voice chat. Click the microphone to start talking.",
-      timestamp: new Date(),
-    },
-  ]);
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const savedMessages = localStorage.getItem("chatHistory");
+    if (savedMessages) {
+      return JSON.parse(savedMessages).map((msg: any) => ({
+        ...msg,
+        timestamp: new Date(msg.timestamp),
+      }));
+    }
+    return [
+      {
+        id: "welcome",
+        role: "assistant",
+        content: "Hello! I'm ready for voice chat. Click the microphone to start talking.",
+        timestamp: new Date(),
+      },
+    ];
+  });
+
+  useEffect(() => {
+    localStorage.setItem("chatHistory", JSON.stringify(messages));
+  }, [messages]);
   
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState(false);
+  const [useVAD, setUseVAD] = useState(false);
+  const vadRef = useRef<vad.MicVAD | null>(null);
+
+  useEffect(() => {
+    if (useVAD) {
+      const initVAD = async () => {
+        const myvad = await vad.MicVAD.new({
+          onSpeechStart: () => {
+            startRecording();
+          },
+          onSpeechEnd: () => {
+            stopRecording();
+          },
+        });
+        vadRef.current = myvad;
+        myvad.start();
+      };
+      initVAD();
+    } else {
+      if (vadRef.current) {
+        vadRef.current.destroy();
+        vadRef.current = null;
+      }
+    }
+    return () => {
+      if (vadRef.current) {
+        vadRef.current.destroy();
+        vadRef.current = null;
+      }
+    };
+  }, [useVAD]);
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -329,6 +377,16 @@ export default function TestAgentDialog({ open, onOpenChange, selectedVoice }: T
           </Button>
           
           <div className="w-12 h-12 flex items-center justify-center">
+            {isRecording && mediaRecorderRef.current && (
+              <AudioVisualizer
+                mediaRecorder={mediaRecorderRef.current}
+                width={50}
+                height={50}
+                barWidth={2}
+                gap={1}
+                barColor={"#A1A1AA"}
+              />
+            )}
             {isPlaying && (
               <div className="flex space-x-1">
                 <div className="w-1 h-4 bg-primary animate-bounce" style={{animationDelay: '0ms'}}></div>
@@ -344,8 +402,12 @@ export default function TestAgentDialog({ open, onOpenChange, selectedVoice }: T
             ? "Release to send your message" 
             : isPlaying
             ? "Click the mic to interrupt"
-            : "Hold the microphone button to speak"
+            : useVAD ? "Speak to talk" : "Hold the microphone button to speak"
           }
+        </div>
+        <div className="flex items-center justify-center space-x-2">
+          <Switch id="vad-switch" checked={useVAD} onCheckedChange={setUseVAD} />
+          <Label htmlFor="vad-switch">Enable VAD</Label>
         </div>
       </DialogContent>
     </Dialog>
