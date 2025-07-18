@@ -13,7 +13,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { fetchAIResponse } from "@/api/chat";
 import { streamTextToSpeech } from "@/api/elevenlabs";
-import * as vad from "@ricky0123/vad-web";
+import { MicVAD } from "@ricky0123/vad-web";
 import { AudioVisualizer } from "react-audio-visualize";
 
 interface Message {
@@ -59,12 +59,12 @@ export default function TestAgentDialog({ open, onOpenChange, selectedVoice }: T
   const [error, setError] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState(false);
   const [useVAD, setUseVAD] = useState(false);
-  const vadRef = useRef<vad.MicVAD | null>(null);
+  const vadRef = useRef<MicVAD | null>(null);
 
   useEffect(() => {
     if (useVAD) {
       const initVAD = async () => {
-        const myvad = await vad.MicVAD.new({
+        const myvad = await MicVAD.new({
           onSpeechStart: () => {
             startRecording();
           },
